@@ -1,109 +1,176 @@
 import os
-import requests
-import json
 import re
-from PIL import Image, ImageSequence
-from concurrent.futures import ThreadPoolExecutor
 
-# --- CONFIGURATION ---
-DEX_COUNT = 386  # Gen 1-3 (Emerald Era)
-BASE_URL = "https://play.pokemonshowdown.com/sprites/ani/"
-CRY_URL = "https://play.pokemonshowdown.com/audio/cries/"
+JAVA_SRC = "core/src/main/java/com/shatteredpixel/shatteredpixeldungeon"
+ITEMS_DIR = f"{JAVA_SRC}/items"
+NPCS_DIR = f"{JAVA_SRC}/actors/npcs"
+MOBS_DIR = f"{JAVA_SRC}/actors/mobs"
+LEVELS_DIR = f"{JAVA_SRC}/levels"
+SYSTEMS_DIR = f"{JAVA_SRC}/pokemon" # Brand new directory for our core logic
 
-# Directory Mapping
-PATHS = {
-    "sprites": "core/src/main/assets/sprites",
-    "sounds": "core/src/main/assets/sounds",
-    "java": "core/src/main/java/com/shatteredpixel/shatteredpixeldungeon",
-    "res": "android/src/main/res/values"
-}
+for directory in [ITEMS_DIR, NPCS_DIR, MOBS_DIR, LEVELS_DIR, SYSTEMS_DIR]:
+    os.makedirs(directory, exist_ok=True)
 
-for folder in PATHS.values():
-    os.makedirs(folder, exist_ok=True)
+# --- 1. INJECT THE PARTY SYSTEM (Global State) ---
+def inject_party_system():
+    print("Writing PartyManager.java...")
+    party_code = """package com.shatteredpixel.shatteredpixeldungeon.pokemon;
 
-# --- ASSET PIPELINE ---
-def sanitize(name):
-    return name.lower().replace("-","").replace(".","").replace(" ","")
+import java.util.ArrayList;
 
-def rip_assets(p_id):
-    try:
-        # 1. Fetch Stats
-        r = requests.get(f"https://pokeapi.co/api/v2/pokemon/{p_id}", timeout=5)
-        data = r.json()
-        name = sanitize(data['name'])
-        
-        # 2. Rip Animated Sprite (GIF -> PNG Strip)
-        gif_res = requests.get(f"{BASE_URL}{name}.gif", timeout=5)
-        if gif_res.status_code == 200:
-            gif_path = f"tmp_{name}.gif"
-            with open(gif_path, 'wb') as f: f.write(gif_res.content)
-            with Image.open(gif_path) as img:
-                frames = [f.copy().convert("RGBA") for f in ImageSequence.Iterator(img)]
-                w, h = frames[0].size
-                sheet = Image.new("RGBA", (w * len(frames), h))
-                for i, frame in enumerate(frames):
-                    sheet.paste(frame, (i * w, 0))
-                sheet.save(f"{PATHS['sprites']}/pokemon_{name}.png")
-            os.remove(gif_path)
+public class PartyManager {
+    // Stores the names/IDs of caught Pokemon. Max size 6.
+    public static ArrayList<String> roster = new ArrayList<>();
+    public static int activeIndex = 0;
 
-        # 3. Rip Cry
-        cry_res = requests.get(f"{CRY_URL}{name}.ogg", timeout=5)
-        if cry_res.status_code == 200:
-            with open(f"{PATHS['sounds']}/cry_{name}.ogg", 'wb') as f:
-                f.write(cry_res.content)
-        
-        return {"name": name, "hp": data['stats'][0]['base_stat']}
-    except:
-        return None
-
-# --- ENGINE PATCHING ---
-def patch_ui():
-    print("Patching UI Strings...")
-    path = f"{PATHS['res']}/strings.xml"
-    if os.path.exists(path):
-        with open(path, 'r', encoding='utf-8') as f: s = f.read()
-        reps = {
-            "Warrior": "Bulbasaur",
-            "Mage": "Charmander",
-            "Rogue": "Squirtle",
-            "Huntress": "Pikachu",
-            "Dungeon": "Region",
-            "Health": "HP",
-            "Strength": "Atk"
+    public static boolean catchPokemon(String name) {
+        if (roster.size() < 6) {
+            roster.add(name);
+            return true;
         }
-        for k, v in reps.items(): s = s.replace(k, v)
-        with open(path, 'w', encoding='utf-8') as f: f.write(s)
+        // In the future: Send to PC Box
+        return false;
+    }
 
-def patch_controls():
-    print("Forcing Virtual D-Pad...")
-    path = f"core/src/main/java/com/shatteredpixel/shatteredpixeldungeon/ShatteredPixelDungeon.java"
-    if os.path.exists(path):
-        with open(path, 'r') as f: c = f.read()
-        # Injects d-pad force at the end of the init() method
-        c = re.sub(r'(public static void init\(\) \{)', 
-                   r'\1\n        vDPad = true;', c)
-        with open(path, 'w') as f: f.write(c)
-
-def patch_combat():
-    print("Injecting Pokemon Type Multipliers...")
-    path = f"core/src/main/java/com/shatteredpixel/shatteredpixeldungeon/actors/Char.java"
-    if os.path.exists(path):
-        with open(path, 'r') as f: c = f.read()
-        # Standard SPD damage calculation hook
-        c = c.replace("damage = (int)(damage * dr);", 
-                      "damage = (int)(damage * dr * 1.25f); // Pokemon Stat Boost")
-        with open(path, 'w') as f: f.write(c)
-
-def main():
-    print(f"Starting Multithreaded Rip (1-{DEX_COUNT})...")
-    with ThreadPoolExecutor(max_workers=20) as executor:
-        results = list(executor.map(rip_assets, range(1, DEX_COUNT + 1)))
+    public static String getActivePokemon() {
+        if (roster.isEmpty()) return "Bulbasaur"; // Fallback starter
+        return roster.get(activeIndex);
+    }
     
-    # Run patches
-    patch_ui()
-    patch_controls()
-    patch_combat()
-    print("Pokemon-SPD Conversion Ready.")
+    public static void healParty() {
+        // Logic to restore HP/PP for all roster members goes here
+    }
+}
+"""
+    with open(f"{SYSTEMS_DIR}/PartyManager.java", "w", encoding="utf-8") as f:
+        f.write(party_code)
+
+# --- 2. INJECT THE ADVANCED POKEBALL ---
+def inject_pokeball():
+    print("Writing PokeBall.java mechanics...")
+    pokeball_code = """package com.shatteredpixel.shatteredpixeldungeon.items;
+
+import com.shatteredpixel.shatteredpixeldungeon.actors.Char;
+import com.shatteredpixel.shatteredpixeldungeon.actors.mobs.Mob;
+import com.shatteredpixel.shatteredpixeldungeon.items.weapon.missiles.MissileWeapon;
+import com.shatteredpixel.shatteredpixeldungeon.pokemon.PartyManager;
+
+public class PokeBall extends MissileWeapon {
+    
+    public PokeBall() {
+        super();
+        name = "Poké Ball";
+        image = 100; // Placeholder for the Pokeball sprite index
+    }
+
+    @Override
+    public void onThrow(Char cellTarget) {
+        if (cellTarget instanceof Mob) {
+            Mob wildPokemon = (Mob) cellTarget;
+            float catchChance = ((3 * wildPokemon.HT - 2 * wildPokemon.HP) / (3 * wildPokemon.HT)) * 0.5f;
+            
+            if (com.watabou.utils.Random.Float() < catchChance) {
+                String pkmName = wildPokemon.getClass().getSimpleName();
+                if (PartyManager.catchPokemon(pkmName)) {
+                    wildPokemon.destroy(); // Remove from map
+                    com.shatteredpixel.shatteredpixeldungeon.ShatteredPixelDungeon.scene().addMessage("Gotcha! " + pkmName + " was caught!");
+                } else {
+                    com.shatteredpixel.shatteredpixeldungeon.ShatteredPixelDungeon.scene().addMessage("Your party is full! (PC Box coming soon)");
+                }
+            } else {
+                com.shatteredpixel.shatteredpixeldungeon.ShatteredPixelDungeon.scene().addMessage("Oh no! The Pokemon broke free!");
+            }
+        }
+    }
+}
+"""
+    with open(f"{ITEMS_DIR}/PokeBall.java", "w", encoding="utf-8") as f:
+        f.write(pokeball_code)
+
+# --- 3. INJECT THE POKECENTER NURSE ---
+def inject_nurse_joy():
+    print("Writing NurseJoy.java NPC...")
+    nurse_code = """package com.shatteredpixel.shatteredpixeldungeon.actors.npcs;
+
+import com.shatteredpixel.shatteredpixeldungeon.actors.hero.Hero;
+import com.shatteredpixel.shatteredpixeldungeon.scenes.GameScene;
+import com.shatteredpixel.shatteredpixeldungeon.pokemon.PartyManager;
+
+public class NurseJoy extends NPC {
+    
+    public NurseJoy() {
+        name = "Nurse";
+        spriteClass = com.shatteredpixel.shatteredpixeldungeon.sprites.GhostSprite.class; 
+    }
+
+    @Override
+    public void interact(Hero hero) {
+        hero.HP = hero.HT; // Heal active character
+        PartyManager.healParty(); // Heal background party
+        GameScene.show(new com.shatteredpixel.shatteredpixeldungeon.windows.WndMessage("Welcome to the Pokemon Center! Your party is fully healed."));
+    }
+}
+"""
+    with open(f"{NPCS_DIR}/NurseJoy.java", "w", encoding="utf-8") as f:
+        f.write(nurse_code)
+
+# --- 4. INJECT GYM LEADER FRAMEWORK ---
+def inject_gym_leader():
+    print("Writing GymLeader.java Boss framework...")
+    gym_code = """package com.shatteredpixel.shatteredpixeldungeon.actors.mobs;
+
+public class GymLeader extends Boss {
+    
+    public String badgeName;
+    
+    public GymLeader() {
+        super();
+        name = "Gym Leader Roxanne";
+        HT = HP = 150; // High health for a boss
+        defenseSkill = 10;
+        badgeName = "Stone Badge";
+    }
+
+    @Override
+    public void die(Object cause) {
+        super.die(cause);
+        com.shatteredpixel.shatteredpixeldungeon.ShatteredPixelDungeon.scene().addMessage("You received the " + badgeName + "!");
+        // Drop a TM or special item here
+    }
+}
+"""
+    with open(f"{MOBS_DIR}/GymLeader.java", "w", encoding="utf-8") as f:
+        f.write(gym_code)
+
+# --- 5. INJECT OVERWORLD ROUTING (Dungeon.java) ---
+def inject_overworld_routing():
+    print("Patching Dungeon Depth Routing...")
+    dungeon_path = f"{JAVA_SRC}/Dungeon.java"
+    if os.path.exists(dungeon_path):
+        with open(dungeon_path, 'r', encoding='utf-8') as f: c = f.read()
+        
+        routing_logic = """
+        public static void descend(int specificDepth) {
+            // Depth 1 is Overworld Hub. 
+            if (depth == 1 && specificDepth == 10) { depth = 10; } // Enter Granite Cave
+            else if (depth == 1 && specificDepth == 20) { depth = 20; } // Enter Meteor Falls
+            else if (depth == 15 || depth == 25) { depth = 1; } // Return from Gym
+            else { depth++; } 
+            
+            level = null;
+            saveAll();
+        }
+        """
+        c = re.sub(r'public static void descend\(.*?\)\s*\{', routing_logic + "\n    public static void oldDescend() {", c, count=1)
+        with open(dungeon_path, 'w', encoding='utf-8') as f: f.write(c)
+
+def run_system_injections():
+    inject_party_system()
+    inject_pokeball()
+    inject_nurse_joy()
+    inject_gym_leader()
+    inject_overworld_routing()
+    print("Pokemon Core Systems successfully injected into the Java source.")
 
 if __name__ == "__main__":
-    main()
+    run_system_injections()
