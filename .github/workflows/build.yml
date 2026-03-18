@@ -1,0 +1,82 @@
+name: Build Pokemon-SPD Total Conversion
+
+on: [push, workflow_dispatch]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout SPD Source
+        uses: actions/checkout@v4
+        with:
+          repository: '00-Evan/shattered-pixel-dungeon'
+
+      - name: Set up Environment
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Install Processing Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y imagemagick
+          pip install Pillow requests
+
+      - name: Multithreaded Asset Injector
+        run: |
+          python - <<'EOF'
+          import os, requests, json, re
+          from PIL import Image
+          from concurrent.futures import ThreadPoolExecutor
+
+          # Configuration
+          DEX_COUNT = 151  # Set to 1025 for full National Dex
+          BASE_URL = "https://play.pokemonshowdown.com/sprites/ani/"
+          CRY_URL = "https://play.pokemonshowdown.com/audio/cries/"
+          ASSET_DIR = "assets/pokemon"
+          os.makedirs(ASSET_DIR, exist_ok=True)
+
+          def process_pokemon(p_id):
+              try:
+                  # 1. Get Data from PokeAPI
+                  data_req = requests.get(f"https://pokeapi.co/api/v2/pokemon/{p_id}")
+                  name = data_req.json()['name']
+                  
+                  # 2. Download Animated GIF
+                  gif_path = f"{ASSET_DIR}/{name}.gif"
+                  img_data = requests.get(f"{BASE_URL}{name}.gif").content
+                  with open(gif_path, 'wb') as f: f.write(img_data)
+                  
+                  # 3. Convert GIF to PNG Sprite Sheet (Horizontal Strip)
+                  # Using ImageMagick 'coalesce' to handle GIF optimization layers
+                  sheet_path = f"assets/sprites/pokemon_{name}.png"
+                  os.system(f"convert {gif_path} -coalesce +append {sheet_path}")
+                  
+                  # 4. Download Cry
+                  cry_data = requests.get(f"{CRY_URL}{name}.ogg").content
+                  with open(f"assets/sounds/cry_{name}.ogg", 'wb') as f: f.write(cry_data)
+                  
+                  return f"Processed {name}"
+              except Exception as e:
+                  return f"Error on {p_id}: {e}"
+
+          print(f"Starting Multithreaded Injection for {DEX_COUNT} Pokemon...")
+          with ThreadPoolExecutor(max_workers=20) as executor:
+              results = list(executor.map(process_pokemon, range(1, DEX_COUNT + 1)))
+          
+          # 5. Patch Strings.xml (UI Translation)
+          # We'll map the first 4 for the Hero selection screen
+          hero_map = { 'Warrior': 'Bulbasaur', 'Mage': 'Charmander', 'Rogue': 'Squirtle', 'Huntress': 'Pikachu' }
+          string_path = 'res/values/strings.xml'
+          if os.path.exists(string_path):
+              with open(string_path, 'r') as f: s = f.read()
+              for old, new in hero_map.items():
+                  s = s.replace(f'>{old}<', f'>{new}<')
+              with open(string_path, 'w') as f: f.write(s)
+          EOF
+
+      - name: Build Android APK
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug
