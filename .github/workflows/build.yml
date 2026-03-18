@@ -1,63 +1,62 @@
-name: Build Pokemon-SPD Total Conversion
-
-on: [push, workflow_dispatch]
-
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout SPD Source
-        uses: actions/checkout@v4
-        with:
-          repository: '00-Evan/shattered-pixel-dungeon'
-
-      - name: Set up Environment
-        uses: actions/setup-java@v4
-        with:
-          java-version: '17'
-          distribution: 'temurin'
-
-      - name: Install Processing Tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y imagemagick
-          pip install Pillow requests
-
-      - name: Multithreaded Asset Injector
-        run: |
-          python - <<'EOF'
           import os, requests, json, re
-          from PIL import Image
+          from PIL import Image, ImageSequence
           from concurrent.futures import ThreadPoolExecutor
 
           # Configuration
-          DEX_COUNT = 151  # Set to 1025 for full National Dex
+          DEX_COUNT = 151
           BASE_URL = "https://play.pokemonshowdown.com/sprites/ani/"
           CRY_URL = "https://play.pokemonshowdown.com/audio/cries/"
-          ASSET_DIR = "assets/pokemon"
-          os.makedirs(ASSET_DIR, exist_ok=True)
+          
+          # Create all necessary paths
+          folders = ["assets/pokemon", "assets/sprites", "assets/sounds"]
+          for folder in folders:
+              os.makedirs(folder, exist_ok=True)
+
+          def sanitize_name(name):
+              # Showdown uses lowercase, no spaces, no special chars
+              name = name.lower().replace(" ", "").replace("-", "")
+              if "nidoran-m" in name: return "nidoranm"
+              if "nidoran-f" in name: return "nidoranf"
+              if "mr-mime" in name: return "mrmime"
+              return name
 
           def process_pokemon(p_id):
               try:
                   # 1. Get Data from PokeAPI
-                  data_req = requests.get(f"https://pokeapi.co/api/v2/pokemon/{p_id}")
-                  name = data_req.json()['name']
+                  data_req = requests.get(f"https://pokeapi.co/api/v2/pokemon/{p_id}", timeout=10)
+                  raw_name = data_req.json()['name']
+                  name = sanitize_name(raw_name)
                   
                   # 2. Download Animated GIF
-                  gif_path = f"{ASSET_DIR}/{name}.gif"
-                  img_data = requests.get(f"{BASE_URL}{name}.gif").content
-                  with open(gif_path, 'wb') as f: f.write(img_data)
+                  gif_url = f"{BASE_URL}{name}.gif"
+                  res = requests.get(gif_url, timeout=10)
+                  if res.status_code != 200:
+                      return f"Skipped {name}: GIF not found at {gif_url}"
                   
-                  # 3. Convert GIF to PNG Sprite Sheet (Horizontal Strip)
-                  # Using ImageMagick 'coalesce' to handle GIF optimization layers
-                  sheet_path = f"assets/sprites/pokemon_{name}.png"
-                  os.system(f"convert {gif_path} -coalesce +append {sheet_path}")
+                  gif_path = f"assets/pokemon/{name}.gif"
+                  with open(gif_path, 'wb') as f: f.write(res.content)
+                  
+                  # 3. Convert GIF to PNG Sprite Sheet using Pillow (Thread Safe)
+                  with Image.open(gif_path) as img:
+                      frames = []
+                      for frame in ImageSequence.Iterator(img):
+                          frames.append(frame.copy().convert("RGBA"))
+                      
+                      # Create horizontal strip
+                      width, height = frames[0].size
+                      sheet = Image.new("RGBA", (width * len(frames), height))
+                      for i, frame in enumerate(frames):
+                          sheet.paste(frame, (i * width, 0))
+                      
+                      sheet.save(f"assets/sprites/pokemon_{name}.png")
                   
                   # 4. Download Cry
-                  cry_data = requests.get(f"{CRY_URL}{name}.ogg").content
-                  with open(f"assets/sounds/cry_{name}.ogg", 'wb') as f: f.write(cry_data)
+                  cry_res = requests.get(f"{CRY_URL}{name}.ogg", timeout=10)
+                  if cry_res.status_code == 200:
+                      with open(f"assets/sounds/cry_{name}.ogg", 'wb') as f: 
+                          f.write(cry_res.content)
                   
-                  return f"Processed {name}"
+                  return f"Successfully injected {name}"
               except Exception as e:
                   return f"Error on {p_id}: {e}"
 
@@ -65,18 +64,6 @@ jobs:
           with ThreadPoolExecutor(max_workers=20) as executor:
               results = list(executor.map(process_pokemon, range(1, DEX_COUNT + 1)))
           
-          # 5. Patch Strings.xml (UI Translation)
-          # We'll map the first 4 for the Hero selection screen
-          hero_map = { 'Warrior': 'Bulbasaur', 'Mage': 'Charmander', 'Rogue': 'Squirtle', 'Huntress': 'Pikachu' }
-          string_path = 'res/values/strings.xml'
-          if os.path.exists(string_path):
-              with open(string_path, 'r') as f: s = f.read()
-              for old, new in hero_map.items():
-                  s = s.replace(f'>{old}<', f'>{new}<')
-              with open(string_path, 'w') as f: f.write(s)
-          EOF
-
-      - name: Build Android APK
-        run: |
-          chmod +x gradlew
-          ./gradlew assembleDebug
+          # Print summary
+          success = [r for r in results if "Successfully" in r]
+          print(f"Finished. {len(success)}/{DEX_COUNT} Pokemon processed.")
