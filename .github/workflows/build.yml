@@ -1,29 +1,35 @@
-name: Build Pokemon-Emerald-SPD
+name: Dynamic Pokemon-SPD Build
 
 on:
   push:
-    branches: [ "main", "master" ]
+    branches: [ main, master ]
   workflow_dispatch:
 
 jobs:
-  build:
+  convert-and-build:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout Code
+      - name: Checkout Base SPD
         uses: actions/checkout@v4
         with:
-          # We check out the SPD source directly into the current directory
           repository: '00-Evan/shattered-pixel-dungeon'
-          fetch-depth: 0
 
-      - name: Checkout Mod Scripts
+      - name: Create Scripts Directory
+        run: mkdir -p scripts
+
+      - name: Checkout Personal Customizations
+        # This step pulls your scripts/runtime.py from your own repo 
+        # while staying inside the SPD directory context
         uses: actions/checkout@v4
         with:
-          # This pulls YOUR scripts (like runtime.py) into a subfolder
-          path: mod-files
+          path: 'mod_files'
 
-      - name: Set up Environment
+      - name: Prepare Runtime Script
+        run: |
+          cp mod_files/scripts/runtime.py scripts/runtime.py
+          rm -rf mod_files
+
+      - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
           java-version: '17'
@@ -32,16 +38,16 @@ jobs:
       - name: Install Python Dependencies
         run: pip install Pillow requests
 
-      - name: Execute Emerald Runtime Script
-* run: python mod-files/scripts/runtime.py
+      - name: Execute Emerald Conversion
+        run: python scripts/runtime.py
 
       - name: Build Android APK
         run: |
           chmod +x gradlew
           ./gradlew assembleDebug
 
-      - name: Upload Pokemon-Emerald-Dungeon
+      - name: Upload Final APK
         uses: actions/upload-artifact@v4
         with:
-          name: Pokemon-Emerald-Final
+          name: Pokemon-Emerald-Dungeon-Dynamic
           path: android/build/outputs/apk/debug/android-debug.apk
